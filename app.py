@@ -1,288 +1,312 @@
-from flask import Flask, request, render_template_string, send_file
+import io
+from datetime import date
+import streamlit as st
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from io import BytesIO
 
-app = Flask(__name__)
-
-HTML = r"""
-<!doctype html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Laporan DKM → .docx</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:800px;margin:24px auto;padding:0 12px}
-    fieldset{border:1px solid #ccc;border-radius:8px;margin:16px 0;padding:12px}
-    legend{font-weight:600}
-    label{display:block;margin:8px 0 4px}
-    input[type=text],input[type=number]{width:100%;padding:8px;border:1px solid #bbb;border-radius:6px}
-    .row{display:flex;gap:8px}
-    .row>div{flex:1}
-    button{padding:8px 12px;border:1px solid #555;border-radius:8px;background:#111;color:#fff}
-    .ghost{background:#eee;color:#111;border-color:#ddd}
-    small{color:#666}
-  </style>
-  <script>
-    function addPair(sectionId, prefix){
-      const box = document.getElementById(sectionId);
-      const idx = box.querySelectorAll('.pair').length + 1;
-      const wrap = document.createElement('div');
-      wrap.className = 'pair';
-      wrap.innerHTML = `
-        <div class="row">
-          <div><label>Deskripsi</label><input name="${prefix}_desc_${idx}" type="text" placeholder="mis. Infaq Bu Ninin"></div>
-          <div><label>Jumlah (rupiah, titik sebagai pemisah)</label><input name="${prefix}_amt_${idx}" type="text" placeholder="100.000"></div>
-        </div>`;
-      box.appendChild(wrap);
-    }
-  </script>
-</head>
-<body>
-  <h2>Laporan Keuangan DKM → unduh Word (.docx)</h2>
-  <form method="post" action="/build">
-    <fieldset>
-      <legend>Header & Saldo</legend>
-      <div class="row">
-        <div><label>Bulan & Tahun (contoh: Oktober 2025)</label><input name="bulan_tahun" required></div>
-        <div><label>Nama Bulan Sebelumnya (contoh: September)</label><input name="bulan_sebelumnya" required></div>
-      </div>
-      <label>Saldo awal (rupiah)</label>
-      <input name="saldo_awal" placeholder="4.113.000" required>
-    </fieldset>
-
-    <fieldset>
-      <legend>Pemasukan</legend>
-      <div class="row">
-        <div><label>Kencleng Jumat: berapa kali?</label><input name="kencleng_kali" type="number" min="0" value="0"></div>
-        <div><label>Kencleng Jumat: total (rupiah)</label><input name="kencleng_total" placeholder="1.316.000"></div>
-      </div>
-
-      <label>Infaq Warga RW 07 (Total)</label>
-      <input name="rw07_total" placeholder="1.740.000">
-
-      <div class="row">
-        <div><label>RT 01</label><input name="rt_01" placeholder="290.000"></div>
-        <div><label>RT 02</label><input name="rt_02" placeholder="340.000"></div>
-        <div><label>RT 03</label><input name="rt_03" placeholder="340.000"></div>
-      </div>
-      <div class="row">
-        <div><label>RT 04</label><input name="rt_04" placeholder="370.000"></div>
-        <div><label>RT 05</label><input name="rt_05" placeholder="400.000"></div>
-      </div>
-
-      <hr>
-      <div id="incomeBox"></div>
-      <button type="button" class="ghost" onclick="addPair('incomeBox','income')">+ Tambah baris pemasukan custom</button>
-      <div><small>Baris yang dikosongkan tidak akan dimasukkan.</small></div>
-    </fieldset>
-
-    <fieldset>
-      <legend>Pengeluaran</legend>
-      <div class="row">
-        <div><label>Honor Khotib: berapa kali Jumat?</label><input name="jumat_khotib" type="number" min="0" value="0"></div>
-        <div><label>Honor Khotib (total rupiah)</label><input name="honor_khotib" placeholder="1.000.000"></div>
-      </div>
-      <label>Honor Marbot + Uang Saku (rupiah)</label>
-      <input name="honor_marbot_uangsaku" placeholder="1.250.000">
-      <div class="row">
-        <div><label>Listrik: berapa kali?</label><input name="listrik_kali" type="number" min="0" value="0"></div>
-        <div><label>Bayar Listrik (rupiah)</label><input name="bayar_listrik" placeholder="176.000"></div>
-      </div>
-
-      <hr>
-      <div id="expenseBox"></div>
-      <button type="button" class="ghost" onclick="addPair('expenseBox','expense')">+ Tambah baris pengeluaran custom</button>
-      <div><small>Kosong = di-skip. Rapih tanpa baris kosong.</small></div>
-    </fieldset>
-
-    <fieldset>
-      <legend>Tanda Tangan</legend>
-      <div class="row">
-        <div><label>Tanggal TTD (contoh: 31 Oktober 2025)</label><input name="tanggal_ttd"></div>
-        <div><label>Nama Ketua DKM</label><input name="ttd_ketua" value="Ali Marga"></div>
-        <div><label>Nama Bendahara</label><input name="ttd_bendahara" value="Eneng Nariah"></div>
-      </div>
-    </fieldset>
-
-    <button type="submit">Buat & Unduh .docx</button>
-  </form>
-</body>
-</html>
-"""
-
-def to_int(val: str) -> int:
-    if not val: return 0
-    s = val.replace(".", "").replace(",", "").strip()
-    return int(s) if s.isdigit() else 0
-
+# ---------- Helpers ----------
 def rupiah(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
-def add_row(tbl, left, right):
-    row = tbl.add_row().cells
-    row[0].text = left
-    row[1].text = right
+def parse_int(s: str) -> int:
+    if not s:
+        return 0
+    s = s.replace(".", "").replace(",", "").strip()
+    return int(s) if s.isdigit() else 0
 
-def base_doc():
-    doc = Document()
+def add_row(table, left: str, right: str, right_align=True):
+    r = table.add_row().cells
+    r[0].text = left
+    p = r[1].paragraphs[0]
+    run = p.add_run(right)
+    if right_align:
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    return r
+
+def small_para(p):
+    pf = p.paragraph_format
+    pf.space_before = Pt(0)
+    pf.space_after = Pt(0)
+    pf.line_spacing = 1.0
+
+def set_normal_style(doc: Document):
     style = doc.styles['Normal']
     style.font.name = 'Times New Roman'
     style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
     style.font.size = Pt(11)
-    return doc
 
-@app.get("/")
-def form():
-    return render_template_string(HTML)
+def new_table(doc, cols=2, col2_width_cm=5.0):
+    tbl = doc.add_table(rows=1, cols=cols)
+    tbl.autofit = False
+    # kolom nominal agak sempit, biar hemat ruang
+    tbl.columns[0].width = Cm(14.5 - col2_width_cm)
+    tbl.columns[1].width = Cm(col2_width_cm)
+    for cell in tbl.rows[0].cells:
+        for p in cell.paragraphs:
+            small_para(p)
+    return tbl
 
-@app.post("/build")
-def build():
-    f = request.form
+def add_section_title(doc, text):
+    p = doc.add_paragraph(text)
+    p.runs[0].bold = True
+    small_para(p)
 
-    # Header
-    bulan_tahun = f.get("bulan_tahun","")
-    bulan_sebelum = f.get("bulan_sebelumnya","")
-    saldo_awal_str = f.get("saldo_awal","")
-    saldo_awal = to_int(saldo_awal_str)
+# ---------- DOCX builder ----------
+def build_docx(
+    bulan_tahun: str,
+    nama_bulan_sebelumnya: str,
+    saldo_awal: int,
+    kencleng_kali: int,
+    kencleng_total: int,
+    income_custom: list,         # list of (desc:str, amount:int)
+    rt_breakdown: list,          # list panjang 5 angka int
+    khotib_kali: int,
+    honor_khotib: int,
+    honor_marbot: int,
+    listrik_kali: int,
+    bayar_listrik: int,
+    expense_custom: list,        # list of (desc, amount)
+    ttd_kota_tanggal: str,
+    nama_ketua: str,
+    nama_bendahara: str
+):
+    doc = Document()
+    set_normal_style(doc)
 
-    # Income fixed
-    kencleng_kali = f.get("kencleng_kali","")
-    kencleng_total = to_int(f.get("kencleng_total",""))
-    rw07_total = to_int(f.get("rw07_total",""))
-    rt_vals = [f.get("rt_01",""), f.get("rt_02",""), f.get("rt_03",""),
-               f.get("rt_04",""), f.get("rt_05","")]
+    # Margin tipis biar muat 1 lembar
+    sec = doc.sections[0]
+    sec.top_margin = Cm(1.6)
+    sec.bottom_margin = Cm(1.6)
+    sec.left_margin = Cm(1.6)
+    sec.right_margin = Cm(1.6)
 
-    # Income custom (pair fields)
-    income_pairs = []
-    for k,v in f.items():
-        # names like income_desc_1 / income_amt_1
-        pass
-    # Build pairs in order:
-    i = 1
-    while True:
-        desc = f.get(f"income_desc_{i}","").strip()
-        amt  = f.get(f"income_amt_{i}","").strip()
-        if not desc and not amt:
-            # stop when neither provided for a while
-            if i>50: break
-            i += 1
-            continue
-        if desc and amt:
-            income_pairs.append((desc, to_int(amt)))
-        i += 1
-
-    # Expense fixed
-    jumat_khotib = f.get("jumat_khotib","")
-    honor_khotib = to_int(f.get("honor_khotib",""))
-    honor_marbot = to_int(f.get("honor_marbot_uangsaku",""))
-    listrik_kali = f.get("listrik_kali","")
-    bayar_listrik = to_int(f.get("bayar_listrik",""))
-
-    # Expense custom
-    expense_pairs = []
-    j = 1
-    while True:
-        desc = f.get(f"expense_desc_{j}","").strip()
-        amt  = f.get(f"expense_amt_{j}","").strip()
-        if not desc and not amt:
-            if j>80: break
-            j += 1
-            continue
-        if desc and amt:
-            expense_pairs.append((desc, to_int(amt)))
-        j += 1
-
-    # Build DOCX
-    doc = base_doc()
-
+    # Judul
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("Laporan Keuangan DKM Sirojul Huda"); r.bold=True; r.font.size=Pt(12)
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.add_run("Aspol Sukamiskin Bandung")
-    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.add_run(f"Bulan {bulan_tahun}")
+    r = p.add_run("Laporan Keuangan DKM Sirojul Huda")
+    r.bold = True; r.font.size = Pt(12)
+    small_para(p)
 
-    doc.add_paragraph(f"Saldo {bulan_sebelum}").runs[0].bold = True
-    p = doc.add_paragraph(f"{saldo_awal_str}"); p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p = doc.add_paragraph("Aspol Sukamiskin Bandung")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    small_para(p)
+
+    p = doc.add_paragraph(f"Bulan {bulan_tahun}")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    small_para(p)
+
+    # Saldo sebelumnya
+    add_section_title(doc, f"Saldo {nama_bulan_sebelumnya}")
+    p = doc.add_paragraph(rupiah(saldo_awal))
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    small_para(p)
 
     # Pemasukan
-    doc.add_paragraph(); doc.add_paragraph("Pemasukan").runs[0].bold = True
-    t_in = doc.add_table(rows=1, cols=2); t_in.autofit=True; t_in.rows[0].cells[0].text=""; t_in.rows[0].cells[1].text=""
+    doc.add_paragraph()  # spasi tipis
+    add_section_title(doc, "Pemasukan")
+    tbl_in = new_table(doc, col2_width_cm=4.3)
 
-    total_in = 0
-    if kencleng_kali or kencleng_total:
-        add_row(t_in, f"Kencleng Jumat ({kencleng_kali}x)" if kencleng_kali else "Kencleng Jumat", rupiah(kencleng_total))
-        total_in += kencleng_total
+    # Kencleng (fixed)
+    add_row(tbl_in, f"Kencleng Jumat ({kencleng_kali}x)", rupiah(kencleng_total))
 
-    if rw07_total:
-        add_row(t_in, "Infaq Warga RW 07 (total)", rupiah(rw07_total))
-        total_in += rw07_total
+    total_pemasukan = kencleng_total
 
-    for desc, amt in income_pairs:
-        add_row(t_in, desc, rupiah(amt))
-        total_in += amt
+    # Custom income (skip yang kosong)
+    for desc, amt in income_custom:
+        desc = (desc or "").strip()
+        amt_i = parse_int(amt) if isinstance(amt, str) else int(amt or 0)
+        if desc and amt_i:
+            add_row(tbl_in, desc, rupiah(amt_i))
+            total_pemasukan += amt_i
 
-    add_row(t_in, "Total Pemasukan", rupiah(total_in))
+    # Total pemasukan
+    add_row(tbl_in, "Total Pemasukan", rupiah(total_pemasukan))
 
-    # Rincian RT (hanya yang diisi)
-    doc.add_paragraph(); doc.add_paragraph("Rincian Infaq Warga RW 07 (berdasarkan RT)").runs[0].bold = True
-    t_rt = doc.add_table(rows=1, cols=2); t_rt.autofit=True; t_rt.rows[0].cells[0].text=""; t_rt.rows[0].cells[1].text=""
-    for i, val in enumerate(rt_vals, start=1):
-        val = val.strip()
-        if val:
-            add_row(t_rt, f"RT {i:02d}", val)
+    # Rincian RW 07 (opsional; hanya tampil bila ada salah satu diisi)
+    if any(x > 0 for x in rt_breakdown):
+        doc.add_paragraph()
+        add_section_title(doc, "Rincian Infaq Warga RW 07 (berdasarkan RT)")
+        tbl_rt = new_table(doc, col2_width_cm=4.0)
+        for i, val in enumerate(rt_breakdown, start=1):
+            if val > 0:
+                add_row(tbl_rt, f"RT {i:02d}", rupiah(val))
 
-    # Pemasukan kotor
-    doc.add_paragraph(); doc.add_paragraph("Pemasukan Kotor").runs[0].bold = True
-    gross = saldo_awal + total_in
-    p = doc.add_paragraph(rupiah(gross)); p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    # Pemasukan Kotor
+    doc.add_paragraph()
+    add_section_title(doc, "Pemasukan Kotor")
+    pemasukan_kotor = saldo_awal + total_pemasukan
+    p = doc.add_paragraph(rupiah(pemasukan_kotor))
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    small_para(p)
 
     # Pengeluaran
-    doc.add_paragraph(); doc.add_paragraph("Pengeluaran").runs[0].bold = True
-    t_out = doc.add_table(rows=1, cols=2); t_out.autofit=True; t_out.rows[0].cells[0].text=""; t_out.rows[0].cells[1].text=""
-    total_out = 0
+    doc.add_paragraph()
+    add_section_title(doc, "Pengeluaran")
+    tbl_out = new_table(doc, col2_width_cm=4.3)
 
-    if jumat_khotib or honor_khotib:
-        add_row(t_out, f"Honor Khotib ({jumat_khotib}x)".strip(), rupiah(honor_khotib))
-        total_out += honor_khotib
+    total_pengeluaran = 0
+
+    # Fixed 3 items
+    if honor_khotib:
+        add_row(tbl_out, f"Honor Khotib ({khotib_kali}x)", rupiah(honor_khotib))
+        total_pengeluaran += honor_khotib
     if honor_marbot:
-        add_row(t_out, "Honor Marbot + Uang Saku", rupiah(honor_marbot))
-        total_out += honor_marbot
-    if listrik_kali or bayar_listrik:
-        add_row(t_out, f"Bayar Listrik ({listrik_kali}x)".strip(), rupiah(bayar_listrik))
-        total_out += bayar_listrik
+        add_row(tbl_out, "Honor Marbot + Uang Saku", rupiah(honor_marbot))
+        total_pengeluaran += honor_marbot
+    if bayar_listrik:
+        add_row(tbl_out, f"Bayar Listrik ({listrik_kali}x)", rupiah(bayar_listrik))
+        total_pengeluaran += bayar_listrik
 
-    for desc, amt in expense_pairs:
-        add_row(t_out, desc, rupiah(amt))
-        total_out += amt
+    # Custom expenses
+    for desc, amt in expense_custom:
+        desc = (desc or "").strip()
+        amt_i = parse_int(amt) if isinstance(amt, str) else int(amt or 0)
+        if desc and amt_i:
+            add_row(tbl_out, desc, rupiah(amt_i))
+            total_pengeluaran += amt_i
 
-    add_row(t_out, "Total Pengeluaran", rupiah(total_out))
+    add_row(tbl_out, "Total Pengeluaran", rupiah(total_pengeluaran))
 
     # Saldo akhir
-    doc.add_paragraph(); doc.add_paragraph(f"Saldo {bulan_tahun}").runs[0].bold = True
-    end_bal = gross - total_out
-    p = doc.add_paragraph(rupiah(end_bal)); p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-
-    # Footer / TTD
     doc.add_paragraph()
-    row = doc.add_table(rows=1, cols=2).rows[0].cells
-    row[0].paragraphs[0].add_run("Ketua DKM Sirojul Huda")
-    right = row[1].paragraphs[0]; right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    right.add_run(f"Bandung, {f.get('tanggal_ttd','')}")
+    add_section_title(doc, f"Saldo {bulan_tahun}")
+    saldo_akhir = pemasukan_kotor - total_pengeluaran
+    p = doc.add_paragraph(rupiah(saldo_akhir))
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    small_para(p)
+
+    # TTD 2 kolom (ada jarak kosong buat tanda tangan)
+    doc.add_paragraph()
+    tbl_sig = doc.add_table(rows=2, cols=2)
+    tbl_sig.autofit = False
+    tbl_sig.columns[0].width = Cm(9.5)
+    tbl_sig.columns[1].width = Cm(9.5)
+
+    # Baris jabatan + tanggal
+    left = tbl_sig.rows[0].cells[0].paragraphs[0]
+    left.add_run("Ketua DKM Sirojul Huda")
+    small_para(left)
+
+    right = tbl_sig.rows[0].cells[1].paragraphs[0]
+    right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    right.add_run(ttd_kota_tanggal)
+    small_para(right)
+
+    # Baris nama dengan ruang tanda tangan di atasnya
+    # tambahkan beberapa baris kosong tipis untuk ruang paraf
+    for _ in range(2):
+        doc.add_paragraph("")
 
     row2 = doc.add_table(rows=1, cols=2).rows[0].cells
-    row2[0].paragraphs[0].add_run(f.get("ttd_ketua",""))
-    r2 = row2[1].paragraphs[0]; r2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    r2.add_run(f.get("ttd_bendahara",""))
+    l = row2[0].paragraphs[0]; l.add_run(nama_ketua); small_para(l)
+    r = row2[1].paragraphs[0]; r.alignment = WD_ALIGN_PARAGRAPH.RIGHT; r.add_run(nama_bendahara); small_para(r)
 
-    # Return .docx
-    buf = BytesIO()
-    doc.save(buf); buf.seek(0)
-    filename = f"Laporan_DKM_{bulan_tahun.replace(' ','_')}.docx" if bulan_tahun else "Laporan_DKM.docx"
-    return send_file(buf, as_attachment=True, download_name=filename,
-                     mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    # Baris “Bendahara DKM” di bawah nama kanan (supaya jelas)
+    last = doc.add_table(rows=1, cols=2).rows[0].cells
+    last[0].paragraphs[0].add_run("")  # kosong kiri
+    pr = last[1].paragraphs[0]
+    pr.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    pr.add_run("Bendahara DKM")
+    small_para(pr)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    # Export bytes
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio, saldo_akhir, pemasukan_kotor, total_pengeluaran
+
+# ---------- UI ----------
+st.set_page_config(page_title="Laporan DKM", layout="wide")
+st.title("Laporan Keuangan DKM — Generator DOCX (rapi 1 lembar)")
+
+colA, colB, colC = st.columns([1,1,1])
+
+with colA:
+    bulan_tahun = st.text_input("Bulan & Tahun (mis. Oktober 2025)", "Oktober 2025")
+    nama_bulan_sebelumnya = st.text_input("Nama Bulan Sebelumnya", "September")
+    saldo_awal = parse_int(st.text_input(f"Saldo {nama_bulan_sebelumnya}", "4.113.000"))
+
+with colB:
+    st.subheader("Pemasukan (fixed & custom)")
+    kencleng_kali = st.number_input("Kencleng Jumat — jumlah kali", min_value=0, value=5, step=1)
+    kencleng_total = parse_int(st.text_input("Kencleng Jumat — total", "1.316.000"))
+
+    st.markdown("**Custom Pemasukan** (kosongkan bila tidak dipakai)")
+    income_custom = []
+    for i in range(1, 8):  # 7 baris custom
+        c1, c2 = st.columns([2,1])
+        with c1:
+            dsc = st.text_input(f"Uraian pemasukan {i}", value="" if i>3 else (["Infaq Warga RW 07 (total)","Infaq Ibu Ninin","Infaq Bapak Agus"][i-1] if i<=3 else ""))
+        with c2:
+            amt = st.text_input(f"Nominal pemasukan {i}", value="" if i>3 else (["1.740.000","100.000","200.000"][i-1] if i<=3 else ""))
+        income_custom.append((dsc, amt))
+
+with colC:
+    st.subheader("Rincian RW 07 (RT 1–5)")
+    rt_breakdown = []
+    defaults = ["290.000","340.000","340.000","370.000","400.000"]
+    for i in range(5):
+        rt_breakdown.append(parse_int(st.text_input(f"RT {i+1:02d}", defaults[i])))
+
+st.markdown("---")
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("Pengeluaran (fixed)")
+    khotib_kali = st.number_input("Khotib — jumlah Jumat", min_value=0, value=5, step=1)
+    honor_khotib = parse_int(st.text_input("Honor Khotib — total", "1.000.000"))
+    honor_marbot = parse_int(st.text_input("Honor Marbot + Uang Saku", "1.250.000"))
+    listrik_kali = st.number_input("Listrik — jumlah kali", min_value=0, value=2, step=1)
+    bayar_listrik = parse_int(st.text_input("Bayar Listrik — total", "176.000"))
+
+with col2:
+    st.subheader("Pengeluaran (custom)")
+    expense_custom = []
+    labels = ["Fotocopy","Alat perbaikan kipas","Ongkos bawa drum","Ongkos pembuatan bedug"]
+    values = ["5.000","27.500","65.000","400.000"]
+    for i in range(1, 9):  # 8 baris custom
+        c1, c2 = st.columns([2,1])
+        with c1:
+            dsc = st.text_input(f"Uraian pengeluaran {i}", value=(labels[i-1] if i<=4 else ""))
+        with c2:
+            amt = st.text_input(f"Nominal pengeluaran {i}", value=(values[i-1] if i<=4 else ""))
+        expense_custom.append((dsc, amt))
+
+st.markdown("---")
+colX, colY = st.columns(2)
+with colX:
+    ttd_kota_tanggal = st.text_input("Kota & tanggal untuk tanda tangan (kanan atas)", "Bandung, 31 Oktober 2025")
+with colY:
+    nama_ketua = st.text_input("Nama Ketua DKM", "Ali Marga")
+    nama_bendahara = st.text_input("Nama Bendahara DKM", "Eneng Nariah")
+
+if st.button("📝 Buat Dokumen Word"):
+    bio, saldo_akhir, pk, tp = build_docx(
+        bulan_tahun,
+        nama_bulan_sebelumnya,
+        saldo_awal,
+        int(kencleng_kali),
+        kencleng_total,
+        income_custom,
+        rt_breakdown,
+        int(khotib_kali),
+        honor_khotib,
+        honor_marbot,
+        int(listrik_kali),
+        bayar_listrik,
+        expense_custom,
+        ttd_kota_tanggal,
+        nama_ketua,
+        nama_bendahara
+    )
+
+    st.success("Berhasil dibuat. Angka otomatis sudah pakai titik & layout dipadatkan agar 1 lembar.")
+    st.write(f"**Pemasukan Kotor:** Rp {rupiah(pk)}  •  **Total Pengeluaran:** Rp {rupiah(tp)}  •  **Saldo Akhir:** Rp {rupiah(pk - tp)}")
+
+    st.download_button(
+        "⬇️ Download DOCX",
+        data=bio.getvalue(),
+        file_name=f"Laporan_DKM_{bulan_tahun.replace(' ', '_')}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
