@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+  <title>Laporan Keuangan DKM</title>
+
+  <!-- PENTING: manifest + warna tema -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f172a">
+
+  <!-- iOS PWA feel -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <style>
+    html, body { margin:0; height:100%; background:#0b1220; }
+    .topbar {
+      position:fixed; top:0; left:0; right:0; height:48px;
+      display:flex; align-items:center; justify-content:space-between;
+      padding:0 12px; color:white; font-family:system-ui, Arial;
+      background:#0f172a; z-index:10; border-bottom:1px solid #1f2937;
+    }
+    .btn { background:#10b981; color:#001; padding:6px 10px; border-radius:8px; border:none; font-weight:600; }
+    .wrap { position:absolute; top:48px; left:0; right:0; bottom:0; }
+    iframe { width:100%; height:100%; border:0; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div>📄 Laporan Keuangan DKM</div>
+    <button id="installBtn" class="btn" style="display:none">Pasang Aplikasi</button>
+  </div>
+
+  <div class="wrap">
+    <iframe src="YOUR_RENDER_URL" allow="clipboard-read; clipboard-write; download"></iframe>
+  </div>
+
+  <script>
+    // Registrasi Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('pwabuilder-sw.js');
+    }
+
+    // Install Prompt
+    let deferredPrompt;
+    const btn = document.getElementById('installBtn');
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      btn.style.display = 'inline-block';
+    });
+    btn.addEventListener('click', async () => {
+      btn.style.display = 'none';
+      if (deferredPrompt) {
+        deferredPrompt.prompt();
+        await deferredPrompt.userChoice;
+        deferredPrompt = null;
+      }
+    });
+  </script>
+</body>
+</html>
